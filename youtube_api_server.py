@@ -1,8 +1,5 @@
 """
-YouTube Download API Server — Render Edition
-=============================================
-Ye server shrutibots.site ka replacement hai.
-Bot ke config.py mein YOUTUBE_API_URL=https://your-app.onrender.com set karo.
+YouTube Download API Server — Render Edition (with cookies)
 """
 
 import os
@@ -25,8 +22,10 @@ logger = logging.getLogger("YT-API")
 DOWNLOADS_DIR    = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
+COOKIES_FILE     = Path("cookies.txt")  # GitHub repo se aayegi
+
 TOKEN_TTL        = 600
-KEEP_ALIVE_EVERY = 840          # 14 min — free plan 15 min pe sote hain
+KEEP_ALIVE_EVERY = 840
 MAX_FILE_AGE_HRS = 1
 PORT             = int(os.getenv("PORT", "8000"))
 SELF_URL         = os.getenv("RENDER_EXTERNAL_URL", "")
@@ -37,9 +36,8 @@ DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)
 
 
 async def keep_alive_task():
-    """Free plan pe server jaagna rakhta hai."""
     if not SELF_URL:
-        logger.info("ℹ️ RENDER_EXTERNAL_URL set nahi — keep-alive disabled")
+        logger.info("ℹ️ Keep-alive disabled (RENDER_EXTERNAL_URL not set)")
         return
     await asyncio.sleep(30)
     logger.info(f"💓 Keep-alive started → {SELF_URL}/health")
@@ -56,6 +54,10 @@ async def keep_alive_task():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Server starting...")
+    if COOKIES_FILE.exists():
+        logger.info(f"🍪 Cookies file found: {COOKIES_FILE}")
+    else:
+        logger.warning("⚠️ cookies.txt not found — YouTube may block downloads!")
     asyncio.create_task(keep_alive_task())
     yield
     logger.info("🛑 Server shutting down")
@@ -96,6 +98,32 @@ def _yt_dlp_download(url: str, opts: dict):
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 
+def get_ydl_opts(video_id: str, file_type: str) -> dict:
+    """yt-dlp options — cookies se YouTube bot detection bypass karo."""
+    base = {
+        "outtmpl":     str(DOWNLOADS_DIR / f"{video_id}.%(ext)s"),
+        "quiet":       True,
+        "no_warnings": True,
+        "noprogress":  True,
+    }
+
+    # Cookies file hai toh use karo
+    if COOKIES_FILE.exists():
+        base["cookiefile"] = str(COOKIES_FILE)
+
+    if file_type == "video":
+        base.update({
+            "format":              "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]",
+            "merge_output_format": "mp4",
+        })
+    else:
+        base.update({
+            "format":         "bestaudio[ext=m4a]/bestaudio/best",
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}],
+        })
+
+    return base
+
 async def download_youtube(video_id: str, file_type: str) -> Path | None:
     file_path = get_file_path(video_id, file_type)
     yt_url    = f"https://www.youtube.com/watch?v={video_id}"
@@ -110,21 +138,9 @@ async def download_youtube(video_id: str, file_type: str) -> Path | None:
     async with download_locks[video_id]:
         if file_path.exists() and file_path.stat().st_size > 0:
             return file_path
-        logger.info(f"⬇️ Downloading {file_type}: {video_id}")
 
-        ydl_opts = (
-            {
-                "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]",
-                "outtmpl": str(DOWNLOADS_DIR / f"{video_id}.%(ext)s"),
-                "merge_output_format": "mp4",
-                "quiet": True, "no_warnings": True, "noprogress": True,
-            } if file_type == "video" else {
-                "format": "bestaudio[ext=m4a]/bestaudio/best",
-                "outtmpl": str(DOWNLOADS_DIR / f"{video_id}.%(ext)s"),
-                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}],
-                "quiet": True, "no_warnings": True, "noprogress": True,
-            }
-        )
+        logger.info(f"⬇️ Downloading {file_type}: {video_id}")
+        ydl_opts = get_ydl_opts(video_id, file_type)
 
         try:
             loop = asyncio.get_running_loop()
@@ -141,9 +157,13 @@ async def download_youtube(video_id: str, file_type: str) -> Path | None:
 
 async def get_live_stream_url(video_id: str) -> str | None:
     try:
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True, "format": "best"}
+        if COOKIES_FILE.exists():
+            opts["cookiefile"] = str(COOKIES_FILE)
+
         loop = asyncio.get_running_loop()
         def _extract():
-            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "format": "best"}) as ydl:
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
                 return info.get("url") or info.get("manifest_url")
         return await loop.run_in_executor(None, _extract)
@@ -157,7 +177,13 @@ async def health():
     cleanup_old_tokens()
     files    = [f for f in DOWNLOADS_DIR.iterdir() if f.is_file()]
     total_mb = sum(f.stat().st_size for f in files) // (1024 * 1024)
-    return {"status": "ok", "cached_files": len(files), "disk_used_mb": total_mb, "active_tokens": len(token_store)}
+    return {
+        "status":        "ok",
+        "cookies":       COOKIES_FILE.exists(),
+        "cached_files":  len(files),
+        "disk_used_mb":  total_mb,
+        "active_tokens": len(token_store),
+    }
 
 @app.get("/download")
 async def get_download_token(url: str = Query(...), type: str = Query("audio")):
