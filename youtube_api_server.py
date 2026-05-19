@@ -22,7 +22,7 @@ logger = logging.getLogger("YT-API")
 DOWNLOADS_DIR    = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
-COOKIES_FILE     = Path(os.getenv("COOKIES_PATH", "/etc/secrets/cookies.txt"))
+COOKIES_FILE = Path(os.getenv("COOKIES_PATH", "/etc/secrets/cookies.txt"))
 
 TOKEN_TTL        = 600
 KEEP_ALIVE_EVERY = 840
