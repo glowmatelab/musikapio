@@ -133,24 +133,12 @@ def get_ydl_opts(video_id: str, file_type: str, client: list = None) -> dict:
 
     if file_type == "video":
         base.update({
-            "format": (
-                "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
-                "/bestvideo[height<=720]+bestaudio"
-                "/best[height<=720]"
-                "/best"
-            ),
+            "format": "best[ext=mp4]/best",
             "merge_output_format": "mp4",
         })
     else:
         base.update({
-            # m4a -> webm -> bestaudio -> best order
-            "format": (
-                "bestaudio[ext=m4a]"
-                "/bestaudio[ext=webm]"
-                "/bestaudio"
-                "/best[ext=mp4]"
-                "/best"
-            ),
+            "format": "bestaudio/best",
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
@@ -175,54 +163,30 @@ async def download_youtube(video_id: str, file_type: str) -> Path | None:
         if file_path.exists() and file_path.stat().st_size > 0:
             return file_path
 
-        # Try 1: tv_embedded + mweb (SABR nahi hota)
-        logger.info(f"⬇️ Attempt 1 (tv_embedded+mweb): {video_id}")
-        try:
-            loop = asyncio.get_running_loop()
-            opts = get_ydl_opts(video_id, file_type, client=["tv_embedded", "mweb"])
-            await loop.run_in_executor(None, lambda: _yt_dlp_download(yt_url, opts))
-            if file_path.exists() and file_path.stat().st_size > 0:
-                logger.info(f"✅ Done: {file_path.name} ({file_path.stat().st_size // 1024} KB)")
-                return file_path
-        except Exception as e:
-            logger.warning(f"⚠️ Attempt 1 failed: {e}")
-            file_path.unlink(missing_ok=True)
-
-        # Try 2: ios client fallback
-        logger.info(f"🔄 Attempt 2 (ios): {video_id}")
-        try:
-            loop = asyncio.get_running_loop()
-            opts = get_ydl_opts(video_id, file_type, client=["ios"])
-            # ios ke liye simpler format
-            if file_type == "audio":
-                opts["format"] = "bestaudio/best"
-            await loop.run_in_executor(None, lambda: _yt_dlp_download(yt_url, opts))
-            if file_path.exists() and file_path.stat().st_size > 0:
-                logger.info(f"✅ Attempt 2 done: {file_path.name}")
-                return file_path
-        except Exception as e:
-            logger.warning(f"⚠️ Attempt 2 failed: {e}")
-            file_path.unlink(missing_ok=True)
-
-        # Try 3: web client, last resort, format=best
-        logger.info(f"🔄 Attempt 3 (web, format=best): {video_id}")
-        try:
-            loop = asyncio.get_running_loop()
-            opts = get_ydl_opts(video_id, file_type, client=["web"])
-            opts["format"] = "best"
-            if file_type == "audio":
-                opts["postprocessors"] = [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "128",
-                }]
-            await loop.run_in_executor(None, lambda: _yt_dlp_download(yt_url, opts))
-            if file_path.exists() and file_path.stat().st_size > 0:
-                logger.info(f"✅ Attempt 3 done: {file_path.name}")
-                return file_path
-        except Exception as e:
-            logger.error(f"❌ All attempts failed: {e}")
-            file_path.unlink(missing_ok=True)
+        attempts = [
+            ("tv_embedded", ["tv_embedded", "mweb"]),
+            ("ios",         ["ios"]),
+            ("web",         ["web"]),
+        ]
+        loop = asyncio.get_running_loop()
+        for attempt_name, client in attempts:
+            logger.info(f"⬇️ Attempt ({attempt_name}): {video_id}")
+            try:
+                opts = get_ydl_opts(video_id, file_type, client=client)
+                opts["format"] = "best"
+                if file_type == "audio":
+                    opts["postprocessors"] = [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "128",
+                    }]
+                await loop.run_in_executor(None, lambda o=opts: _yt_dlp_download(yt_url, o))
+                if file_path.exists() and file_path.stat().st_size > 0:
+                    logger.info(f"✅ Done ({attempt_name}): {file_path.name} ({file_path.stat().st_size // 1024} KB)")
+                    return file_path
+            except Exception as e:
+                logger.warning(f"⚠️ Attempt ({attempt_name}) failed: {e}")
+                file_path.unlink(missing_ok=True)
 
         return None
 
