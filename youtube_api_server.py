@@ -100,6 +100,7 @@ def cleanup_old_files():
             except: pass
 
 def _yt_dlp_download(url: str, opts: dict):
+    opts["quiet"] = False  # debug ke liye temporarily
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 
@@ -111,7 +112,6 @@ def get_ydl_opts(video_id: str, file_type: str) -> dict:
         "noprogress":  True,
     }
 
-    # Writable local copy use karo
     local_cookies = DOWNLOADS_DIR / "cookies.txt"
     if local_cookies.exists():
         base["cookiefile"] = str(local_cookies)
@@ -123,8 +123,9 @@ def get_ydl_opts(video_id: str, file_type: str) -> dict:
         })
     else:
         base.update({
-            "format":         "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
+            "format":         "bestaudio/best",  # simple rakha
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}],
+            "verbose":        True,  # debug
         })
 
     return base
