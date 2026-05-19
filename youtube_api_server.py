@@ -3,6 +3,7 @@ YouTube Download API Server — Render Edition (with cookies)
 """
 
 import os
+import shutil
 import asyncio
 import hashlib
 import time
@@ -19,7 +20,7 @@ import uvicorn
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("YT-API")
 
-DOWNLOADS_DIR    = Path("downloads")
+DOWNLOADS_DIR = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
 COOKIES_FILE = Path(os.getenv("COOKIES_PATH", "/etc/secrets/cookies.txt"))
@@ -56,6 +57,10 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Server starting...")
     if COOKIES_FILE.exists():
         logger.info(f"🍪 Cookies file found: {COOKIES_FILE}")
+        # Startup pe hi copy kar lo downloads mein
+        local_cookies = DOWNLOADS_DIR / "cookies.txt"
+        shutil.copy2(str(COOKIES_FILE), str(local_cookies))
+        logger.info(f"🍪 Cookies copied to {local_cookies}")
     else:
         logger.warning("⚠️ cookies.txt not found — YouTube may block downloads!")
     asyncio.create_task(keep_alive_task())
@@ -90,7 +95,7 @@ def cleanup_old_tokens():
 def cleanup_old_files():
     cutoff = time.time() - (MAX_FILE_AGE_HRS * 3600)
     for f in DOWNLOADS_DIR.iterdir():
-        if f.is_file() and f.stat().st_mtime < cutoff:
+        if f.is_file() and f.name != "cookies.txt" and f.stat().st_mtime < cutoff:
             try: f.unlink(); logger.info(f"🗑️ Deleted: {f.name}")
             except: pass
 
@@ -99,7 +104,6 @@ def _yt_dlp_download(url: str, opts: dict):
         ydl.download([url])
 
 def get_ydl_opts(video_id: str, file_type: str) -> dict:
-    """yt-dlp options — cookies se YouTube bot detection bypass karo."""
     base = {
         "outtmpl":     str(DOWNLOADS_DIR / f"{video_id}.%(ext)s"),
         "quiet":       True,
@@ -107,18 +111,19 @@ def get_ydl_opts(video_id: str, file_type: str) -> dict:
         "noprogress":  True,
     }
 
-    # Cookies file hai toh use karo
-    if COOKIES_FILE.exists():
-        base["cookiefile"] = str(COOKIES_FILE)
+    # Writable local copy use karo
+    local_cookies = DOWNLOADS_DIR / "cookies.txt"
+    if local_cookies.exists():
+        base["cookiefile"] = str(local_cookies)
 
     if file_type == "video":
         base.update({
-            "format":              "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]",
+            "format":              "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
             "merge_output_format": "mp4",
         })
     else:
         base.update({
-            "format":         "bestaudio[ext=m4a]/bestaudio/best",
+            "format":         "bestaudio/best",
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}],
         })
 
@@ -158,8 +163,9 @@ async def download_youtube(video_id: str, file_type: str) -> Path | None:
 async def get_live_stream_url(video_id: str) -> str | None:
     try:
         opts = {"quiet": True, "no_warnings": True, "skip_download": True, "format": "best"}
-        if COOKIES_FILE.exists():
-            opts["cookiefile"] = str(COOKIES_FILE)
+        local_cookies = DOWNLOADS_DIR / "cookies.txt"
+        if local_cookies.exists():
+            opts["cookiefile"] = str(local_cookies)
 
         loop = asyncio.get_running_loop()
         def _extract():
@@ -177,9 +183,10 @@ async def health():
     cleanup_old_tokens()
     files    = [f for f in DOWNLOADS_DIR.iterdir() if f.is_file()]
     total_mb = sum(f.stat().st_size for f in files) // (1024 * 1024)
+    local_cookies = DOWNLOADS_DIR / "cookies.txt"
     return {
         "status":        "ok",
-        "cookies":       COOKIES_FILE.exists(),
+        "cookies":       local_cookies.exists(),
         "cached_files":  len(files),
         "disk_used_mb":  total_mb,
         "active_tokens": len(token_store),
