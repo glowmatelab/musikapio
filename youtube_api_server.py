@@ -123,7 +123,7 @@ def get_ydl_opts(video_id: str, file_type: str) -> dict:
         })
     else:
         base.update({
-            "format":         "bestaudio/best",
+            "format":         "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}],
         })
 
