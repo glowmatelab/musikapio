@@ -1,5 +1,6 @@
 """
 YouTube Download API Server — Render Edition (with cookies)
+Fixed: SABR streaming workaround + proper format fallback
 """
 
 import os
@@ -57,7 +58,6 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Server starting...")
     if COOKIES_FILE.exists():
         logger.info(f"🍪 Cookies file found: {COOKIES_FILE}")
-        # Startup pe hi copy kar lo downloads mein
         local_cookies = DOWNLOADS_DIR / "cookies.txt"
         shutil.copy2(str(COOKIES_FILE), str(local_cookies))
         logger.info(f"🍪 Cookies copied to {local_cookies}")
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Server shutting down")
 
 
-app = FastAPI(title="YouTube Download API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="YouTube Download API", version="2.0.0", lifespan=lifespan)
 
 
 def generate_token(video_id: str, file_type: str) -> str:
@@ -100,16 +100,31 @@ def cleanup_old_files():
             except: pass
 
 def _yt_dlp_download(url: str, opts: dict):
-    opts["quiet"] = False  # debug ke liye temporarily
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 
-def get_ydl_opts(video_id: str, file_type: str) -> dict:
+def get_ydl_opts(video_id: str, file_type: str, client: list = None) -> dict:
+    if client is None:
+        client = ["tv_embedded", "mweb"]
+
     base = {
         "outtmpl":     str(DOWNLOADS_DIR / f"{video_id}.%(ext)s"),
         "quiet":       True,
         "no_warnings": True,
         "noprogress":  True,
+        # SABR workaround — tv_embedded aur mweb SABR se affected nahi
+        "extractor_args": {
+            "youtube": {
+                "player_client": client,
+            }
+        },
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
+        },
     }
 
     local_cookies = DOWNLOADS_DIR / "cookies.txt"
@@ -118,14 +133,29 @@ def get_ydl_opts(video_id: str, file_type: str) -> dict:
 
     if file_type == "video":
         base.update({
-            "format":              "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "format": (
+                "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
+                "/bestvideo[height<=720]+bestaudio"
+                "/best[height<=720]"
+                "/best"
+            ),
             "merge_output_format": "mp4",
         })
     else:
         base.update({
-            "format":         "bestaudio/best",  # simple rakha
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}],
-            "verbose":        True,  # debug
+            # m4a -> webm -> bestaudio -> best order
+            "format": (
+                "bestaudio[ext=m4a]"
+                "/bestaudio[ext=webm]"
+                "/bestaudio"
+                "/best[ext=mp4]"
+                "/best"
+            ),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "128",
+            }],
         })
 
     return base
@@ -145,25 +175,66 @@ async def download_youtube(video_id: str, file_type: str) -> Path | None:
         if file_path.exists() and file_path.stat().st_size > 0:
             return file_path
 
-        logger.info(f"⬇️ Downloading {file_type}: {video_id}")
-        ydl_opts = get_ydl_opts(video_id, file_type)
-
+        # Try 1: tv_embedded + mweb (SABR nahi hota)
+        logger.info(f"⬇️ Attempt 1 (tv_embedded+mweb): {video_id}")
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, lambda: _yt_dlp_download(yt_url, ydl_opts))
+            opts = get_ydl_opts(video_id, file_type, client=["tv_embedded", "mweb"])
+            await loop.run_in_executor(None, lambda: _yt_dlp_download(yt_url, opts))
             if file_path.exists() and file_path.stat().st_size > 0:
                 logger.info(f"✅ Done: {file_path.name} ({file_path.stat().st_size // 1024} KB)")
                 return file_path
-            logger.error("❌ File empty after download")
-            return None
         except Exception as e:
-            logger.error(f"❌ yt-dlp error: {e}")
+            logger.warning(f"⚠️ Attempt 1 failed: {e}")
             file_path.unlink(missing_ok=True)
-            return None
+
+        # Try 2: ios client fallback
+        logger.info(f"🔄 Attempt 2 (ios): {video_id}")
+        try:
+            loop = asyncio.get_running_loop()
+            opts = get_ydl_opts(video_id, file_type, client=["ios"])
+            # ios ke liye simpler format
+            if file_type == "audio":
+                opts["format"] = "bestaudio/best"
+            await loop.run_in_executor(None, lambda: _yt_dlp_download(yt_url, opts))
+            if file_path.exists() and file_path.stat().st_size > 0:
+                logger.info(f"✅ Attempt 2 done: {file_path.name}")
+                return file_path
+        except Exception as e:
+            logger.warning(f"⚠️ Attempt 2 failed: {e}")
+            file_path.unlink(missing_ok=True)
+
+        # Try 3: web client, last resort, format=best
+        logger.info(f"🔄 Attempt 3 (web, format=best): {video_id}")
+        try:
+            loop = asyncio.get_running_loop()
+            opts = get_ydl_opts(video_id, file_type, client=["web"])
+            opts["format"] = "best"
+            if file_type == "audio":
+                opts["postprocessors"] = [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "128",
+                }]
+            await loop.run_in_executor(None, lambda: _yt_dlp_download(yt_url, opts))
+            if file_path.exists() and file_path.stat().st_size > 0:
+                logger.info(f"✅ Attempt 3 done: {file_path.name}")
+                return file_path
+        except Exception as e:
+            logger.error(f"❌ All attempts failed: {e}")
+            file_path.unlink(missing_ok=True)
+
+        return None
 
 async def get_live_stream_url(video_id: str) -> str | None:
     try:
-        opts = {"quiet": True, "no_warnings": True, "skip_download": True, "format": "best"}
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "format": "best",
+            "extractor_args": {"youtube": {"player_client": ["tv_embedded"]}},
+        }
         local_cookies = DOWNLOADS_DIR / "cookies.txt"
         if local_cookies.exists():
             opts["cookiefile"] = str(local_cookies)
@@ -204,7 +275,12 @@ async def get_download_token(url: str = Query(...), type: str = Query("audio")):
     return {"download_token": token}
 
 @app.get("/stream/{video_id}")
-async def stream_file(video_id: str, type: str = Query("audio"), token: str = Query(...), background_tasks: BackgroundTasks = None):
+async def stream_file(
+    video_id: str,
+    type: str = Query("audio"),
+    token: str = Query(...),
+    background_tasks: BackgroundTasks = None
+):
     data = validate_token(token)
     if not data:
         raise HTTPException(status_code=401, detail="Token invalid ya expired")
@@ -215,16 +291,17 @@ async def stream_file(video_id: str, type: str = Query("audio"), token: str = Qu
         file_path = await download_youtube(video_id, data["type"])
 
     if not file_path or not file_path.exists():
-        raise HTTPException(status_code=500, detail="Download fail ho gaya")
+        raise HTTPException(status_code=500, detail="Download fail — cookies refresh karo ya video unavailable hai")
 
     token_store.pop(token, None)
     if background_tasks:
         background_tasks.add_task(cleanup_old_files)
 
-    return FileResponse(str(file_path), media_type="video/mp4" if data["type"] == "video" else "audio/mpeg", filename=file_path.name)
+    media_type = "video/mp4" if data["type"] == "video" else "audio/mpeg"
+    return FileResponse(str(file_path), media_type=media_type, filename=file_path.name)
 
 @app.get("/live")
-async def live_stream(url: str = Query(...), type: str = Query("live")):
+async def live_stream(url: str = Query(...)):
     stream_url = await get_live_stream_url(url.strip())
     if not stream_url:
         raise HTTPException(status_code=500, detail="Live URL nahi mila")
