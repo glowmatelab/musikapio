@@ -5,19 +5,14 @@ echo "📦 Installing Python dependencies..."
 pip install -r requirements.txt
 
 echo "🎬 Installing FFmpeg..."
-mkdir -p /opt/ffmpeg
-cd /opt/ffmpeg
+mkdir -p $HOME/ffmpeg
+cd $HOME/ffmpeg
 
-# Static FFmpeg binary download karo (apt-get Render free pe kaam nahi karta)
 curl -L https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
   -o ffmpeg.tar.xz
 
 tar -xf ffmpeg.tar.xz --strip-components=1
 rm ffmpeg.tar.xz
 
-# PATH mein add karo
-export PATH="/opt/ffmpeg/bin:$PATH"
-echo "export PATH=/opt/ffmpeg/bin:\$PATH" >> ~/.bashrc
-
-echo "✅ FFmpeg version: $(ffmpeg -version | head -1)"
+echo "✅ FFmpeg version: $($HOME/ffmpeg/bin/ffmpeg -version | head -1)"
 echo "✅ Build complete!"
